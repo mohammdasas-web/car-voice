@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>تحكم صوتي مباشر بالسيارة</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #121212;
+      color: #ffffff;
+      text-align: center;
+      padding: 24px;
+      margin: 0;
+    }
+    h2 {
+      margin-bottom: 18px;
+    }
+    .mic-btn {
+      font-size: 22px;
+      padding: 20px 28px;
+      border: none;
+      border-radius: 16px;
+      background: #2e7d32;
+      color: #fff;
+      cursor: pointer;
+      width: 100%;
+      max-width: 360px;
+    }
+    .mic-btn.listening {
+      background: #d32f2f;
+    }
+    .stop-btn {
+      margin-top: 14px;
+      font-size: 18px;
+      padding: 12px 24px;
+      border: none;
+      border-radius: 12px;
+      background: #c62828;
+      color: #fff;
+      cursor: pointer;
+    }
+    #status {
+      margin-top: 20px;
+      font-size: 17px;
+      color: #90caf9;
+      line-height: 1.6;
+    }
+    #wsState {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #bbb;
+    }
+  </style>
+</head>
+<body>
+  <h2>تحكم صوتي مباشر بالسيارة</h2>
+
+  <button id="micBtn" class="mic-btn" onclick="toggleVoice()">اضغط وتكلم صوت</button>
+  <div>
+    <button class="stop-btn" onclick="sendCmd('stop')">إيقاف فوري (Stop)</button>
+  </div>
+
+  <div id="status">الحالة: جاهز للاستماع</div>
+  <div id="wsState">اتصال السيارة: جاري الاتصال...</div>
+
+  <script>
+    const GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY';
+    const CAR_WS_URL = 'ws://192.168.0.118:81/';
+
+    let ws;
+    let recognition;
+    let isListening = false;
+
+    function connectWebSocket() {
+      ws = new WebSocket(CAR_WS_URL);
+
+      ws.onopen = function () {
+        document.getElementById('wsState').innerText = 'اتصال السيارة: متصل (' + CAR_WS_URL + ')';
+      };
+
+      ws.onclose = function () {
+        document.getElementById('wsState').innerText = 'اتصال السيارة: غير متصل - يعاد المحاولة...';
+        setTimeout(connectWebSocket, 2000);
+      };
+
+      ws.onerror = function () {
+        document.getElementById('wsState').innerText = 'اتصال السيارة: تعذر الاتصال بـ 192.168.0.118:81';
+      };
+    }
+
+    function sendCmd(cmd) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(cmd);
+        document.getElementById('status').innerText = 'تم إرسال الأمر: ' + cmd;
+      } else {
+        document.getElementById('status').innerText = 'خطأ: السيارة غير متصلة عبر WebSocket';
+      }
+    }
+
+    function fallbackIntent(phrase) {
+      const t = phrase.toLowerCase()
+        .replace(/[أإآ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي');
+
+      if (/(forward|amem|امام|قدام|امشي|تحرك|قدم)/.test(t)) return 'forward';
+      if (/(backward|wora|خلف|ورا|ارجع|رجوع)/.test(t)) return 'backward';
+      if (/(left|يسار|شمال)/.test(t)) return 'left';
+      if (/(right|يمين|جنوب)/.test(t)) return 'right';
+      if (/(stop|توقف|قف|اوكف|اوگف|بس)/.test(t)) return 'stop';
+      return null;
+    }
+
+    async function askGeminiIntent(phrase) {
+      if (!GEMINI_API_KEY || GEMINI_API_KEY === 'AQ.Ab8RN6ItgZigvA-IhWbFlhjxvAZDsmmHfpzc3tBk9cGLFBpewg') {
+        throw new Error('Missing API Key');
+      }
+
+      const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + encodeURIComponent(GEMINI_API_KEY);
+      const prompt =
+        'Classify the user robot car command into ONLY ONE word from: forward, backward, left, right, stop, none. ' +
+        'Map Arabic/Iraqi/English phrases like امشي لقدام/تحرك/قدم -> forward; ارجع لورا/خلف -> backward; لف يسار/شمال -> left; لف يمين/جنوب -> right; اوكف/وقف/بس -> stop. ' +
+        'Reply with one word only, no punctuation. Input: ' + phrase;
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0 }
+        })
+      });
+
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const text = (
+        data?.candidates?.[0]?.content?.parts?.[0]?.text || ''
+      ).trim().toLowerCase().replace(/[^a-z]/g, '');
+
+      const allowed = ['forward', 'backward', 'left', 'right', 'stop'];
+      return allowed.includes(text) ? text : null;
+    }
+
+    async function handleSpokenPhrase(phrase) {
+      document.getElementById('status').innerText = 'سمعت: "' + phrase + '" — جاري التحليل...';
+      try {
+        const intent = await askGeminiIntent(phrase);
+        if (!intent) {
+          document.getElementById('status').innerText = 'لم أفهم أمراً واضحاً من: "' + phrase + '"';
+          return;
+        }
+        document.getElementById('status').innerText = 'سمعت: "' + phrase + '" -> ' + intent;
+        sendCmd(intent);
+      } catch (e) {
+        const fb = fallbackIntent(phrase);
+        if (fb) {
+          document.getElementById('status').innerText = 'تحليل محلي: "' + phrase + '" -> ' + fb;
+          sendCmd(fb);
+        } else {
+          document.getElementById('status').innerText = 'خطأ تحليل: ' + e.message;
+        }
+      }
+    }
+
+    function initSpeech() {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) {
+        document.getElementById('status').innerText = 'المتصفح لا يدعم SpeechRecognition';
+        return null;
+      }
+
+      const rec = new SR();
+      rec.lang = 'ar-IQ';
+      rec.interimResults = false;
+      rec.maxAlternatives = 1;
+
+      rec.onstart = function () {
+        isListening = true;
+        const btn = document.getElementById('micBtn');
+        btn.classList.add('listening');
+        btn.innerText = 'جاري الاستماع... تكلم الآن';
+        document.getElementById('status').innerText = 'تحدث الآن بالأمر...';
+      };
+
+      rec.onresult = function (event) {
+        const transcript = event.results[0][0].transcript;
+        handleSpokenPhrase(transcript);
+      };
+
+      rec.onerror = function (event) {
+        document.getElementById('status').innerText = 'خطأ ميكروفون: ' + event.error;
+      };
+
+      rec.onend = function () {
+        isListening = false;
+        const btn = document.getElementById('micBtn');
+        btn.classList.remove('listening');
+        btn.innerText = 'اضغط وتكلم صوت';
+      };
+
+      return rec;
+    }
+
+    function toggleVoice() {
+      if (!recognition) {
+        recognition = initSpeech();
+      }
+      if (!recognition) return;
+
+      if (isListening) {
+        recognition.stop();
+      } else {
+        try {
+          recognition.start();
+        } catch (err) {
+          document.getElementById('status').innerText = 'تعذر بدء الصوت: ' + err.message;
+        }
+      }
+    }
+
+    connectWebSocket();
+  </script>
+</body>
+</html>
